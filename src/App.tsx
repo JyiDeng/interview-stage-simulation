@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode
+} from "react";
 
 type SceneMode = "stage" | "online" | "onsite";
 
@@ -7,6 +14,7 @@ type StageSeat = {
   seat: number;
   occupied: boolean;
   personSeed: number;
+  realistic: boolean;
 };
 
 type PersonCard = {
@@ -15,6 +23,19 @@ type PersonCard = {
   active: boolean;
   emphasis?: "lead" | "normal";
 };
+
+type TalkingHeadInstance = {
+  showAvatar: (avatar: Record<string, unknown>) => Promise<void>;
+  setMood: (mood: string) => void;
+  lookAtCamera: (durationMs: number) => void;
+  stop: () => void;
+};
+
+const avatarUrls = [
+  "/avatars/brunette.glb",
+  "/avatars/brunette-t.glb",
+  "/avatars/mpfb.glb"
+];
 
 const sceneLabels: Record<SceneMode, string> = {
   stage: "舞台模拟",
@@ -31,14 +52,30 @@ const palette = [
 ];
 
 function buildStageSeats(occupancy: number): StageSeat[] {
+  let realisticLimit = 8;
+
   return Array.from({ length: 100 }, (_, index) => {
     const row = Math.floor(index / 10);
     const seat = index % 10;
+    const occupied = Math.random() < occupancy;
+    const inFrontRows = row >= 8;
+    const candidate3d =
+      occupied &&
+      inFrontRows &&
+      realisticLimit > 0 &&
+      (seat === 1 || seat === 3 || seat === 5 || seat === 7 || seat === 8) &&
+      Math.random() > 0.28;
+
+    if (candidate3d) {
+      realisticLimit -= 1;
+    }
+
     return {
       row,
       seat,
-      occupied: Math.random() < occupancy,
-      personSeed: Math.floor(Math.random() * 1000)
+      occupied,
+      personSeed: Math.floor(Math.random() * 1000),
+      realistic: candidate3d
     };
   });
 }
@@ -102,6 +139,113 @@ function AvatarFigure({
   );
 }
 
+function RealisticAvatar({
+  avatarUrl,
+  view = "head",
+  active = false,
+  className = "",
+  overlay
+}: {
+  avatarUrl: string;
+  view?: "head" | "upper";
+  active?: boolean;
+  className?: string;
+  overlay?: ReactNode;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const headRef = useRef<TalkingHeadInstance | null>(null);
+  const [status, setStatus] = useState("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function mountAvatar() {
+      if (!containerRef.current) {
+        return;
+      }
+
+      try {
+        const mod = await import("@met4citizen/talkinghead");
+        if (cancelled || !containerRef.current) {
+          return;
+        }
+
+        const head = new mod.TalkingHead(containerRef.current, {
+          cameraView: view,
+          cameraRotateEnable: false,
+          cameraPanEnable: false,
+          cameraZoomEnable: false,
+          lipsyncModules: ["en"],
+          modelFPS: 24,
+          modelPixelRatio: Math.min(window.devicePixelRatio, 1.5),
+          lightAmbientIntensity: 2.4,
+          lightDirectIntensity: 18,
+          lightSpotIntensity: 8,
+          avatarIdleEyeContact: 0.5,
+          avatarIdleHeadMove: 0.55,
+          avatarSpeakingEyeContact: 0.8,
+          avatarSpeakingHeadMove: 0.7
+        }) as TalkingHeadInstance;
+
+        headRef.current = head;
+
+        await head.showAvatar({
+          url: avatarUrl,
+          body: "F",
+          avatarMood: active ? "happy" : "neutral",
+          avatarMute: true,
+          lipsyncLang: "en",
+          avatarIdleEyeContact: active ? 0.8 : 0.45,
+          avatarIdleHeadMove: active ? 0.7 : 0.45
+        });
+
+        if (cancelled) {
+          head.stop();
+          return;
+        }
+
+        setStatus("ready");
+        if (active) {
+          head.lookAtCamera(4000);
+        }
+      } catch (error) {
+        console.error(error);
+        if (!cancelled) {
+          setStatus("error");
+        }
+      }
+    }
+
+    mountAvatar();
+
+    return () => {
+      cancelled = true;
+      headRef.current?.stop();
+      headRef.current = null;
+    };
+  }, [active, avatarUrl, view]);
+
+  useEffect(() => {
+    if (!headRef.current || status !== "ready") {
+      return;
+    }
+    headRef.current.setMood(active ? "happy" : "neutral");
+    if (active) {
+      headRef.current.lookAtCamera(2500);
+    }
+  }, [active, status]);
+
+  return (
+    <div className={["realistic-avatar-shell", className].filter(Boolean).join(" ")}>
+      <div ref={containerRef} className="realistic-avatar-canvas" />
+      {status !== "ready" && (
+        <div className="avatar-fallback">{status === "error" ? "头像加载失败" : "加载动态头像..."}</div>
+      )}
+      {overlay}
+    </div>
+  );
+}
+
 function StageScene({ occupancy }: { occupancy: number }) {
   const seats = useMemo(() => buildStageSeats(occupancy), [occupancy]);
 
@@ -129,9 +273,17 @@ function StageScene({ occupancy }: { occupancy: number }) {
                 >
                   {rowSeats.map((seat) => (
                     <div className="seat-slot" key={`${seat.row}-${seat.seat}`}>
-                      {seat.occupied && (
-                        <AvatarFigure seed={seat.personSeed} scale={0.55 + seat.row * 0.035} />
-                      )}
+                      {seat.occupied &&
+                        (seat.realistic ? (
+                          <RealisticAvatar
+                            avatarUrl={avatarUrls[(seat.row + seat.seat) % avatarUrls.length]}
+                            active={seat.seat % 3 === 0}
+                            view="head"
+                            className={`stage-realistic-avatar row-${seat.row}`}
+                          />
+                        ) : (
+                          <AvatarFigure seed={seat.personSeed} scale={0.55 + seat.row * 0.035} />
+                        ))}
                       <div className="seat-base" />
                     </div>
                   ))}
@@ -168,11 +320,17 @@ function OnlineScene({ count }: { count: number }) {
           {people.map((person, index) => (
             <article className="meeting-tile" key={person.id}>
               <div className="meeting-gradient" />
-              <AvatarFigure seed={index * 31 + 7} bustOnly active={person.active} scale={1.05} />
-              <div className="meeting-meta">
-                <strong>{person.role}</strong>
-                <span>{person.active ? "发言中" : "静音观察"}</span>
-              </div>
+              <RealisticAvatar
+                avatarUrl={avatarUrls[index % avatarUrls.length]}
+                active={person.active}
+                view="head"
+                overlay={
+                  <div className="meeting-meta">
+                    <strong>{person.role}</strong>
+                    <span>{person.active ? "发言中" : "静音观察"}</span>
+                  </div>
+                }
+              />
             </article>
           ))}
         </div>
@@ -204,11 +362,11 @@ function OnsiteScene({ count, rows }: { count: number; rows: number }) {
               <div className="panel-row" key={`panel-row-${rowIndex}`}>
                 {rowPeople.map((person, index) => (
                   <div className="panel-seat" key={person.id}>
-                    <AvatarFigure
-                      seed={rowIndex * 17 + index * 9}
-                      seated={false}
+                    <RealisticAvatar
+                      avatarUrl={avatarUrls[(rowIndex * perRow + index) % avatarUrls.length]}
                       active={person.active}
-                      scale={rowIndex === 0 ? 1 : 0.92}
+                      view="upper"
+                      className={rowIndex === 0 ? "panel-avatar primary" : "panel-avatar secondary"}
                     />
                     <div className="panel-desk" />
                     <div className="panel-name">
